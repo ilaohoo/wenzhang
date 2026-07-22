@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v1.9
-深度分析版：引入估值、历史对比、逻辑推演，自动标注数据来源
+纳斯达克100博客自动写作机器人 v2.0
+增加美股新闻抓取（RSS + Finnhub）
 """
 
 import akshare as ak
@@ -11,6 +11,7 @@ import requests
 import time
 import sys
 import os
+import feedparser
 from datetime import datetime
 from typing import Dict, Tuple, List
 
@@ -20,6 +21,7 @@ from typing import Dict, Tuple, List
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY") or ""  # 新增：Finnhub API Key
 
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
@@ -42,7 +44,81 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"{prefix}[{timestamp}] {msg}{suffix}")
 
 # ====================================================================
-#  数据获取
+#  新闻抓取模块（新增）
+# ====================================================================
+
+def fetch_rss_news() -> str:
+    """从RSS源抓取美股新闻"""
+    log("正在抓取RSS新闻...", "INFO")
+    
+    feeds = [
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^IXIC",
+        "https://www.nasdaq.com/feed/rssoutbound",
+        "https://www.marketwatch.com/rss/headline?type=stock&source=nasdaq"
+    ]
+    
+    all_news = []
+    for url in feeds:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                title = entry.title
+                # 去重
+                if title not in all_news:
+                    all_news.append(f"• {title}")
+        except Exception as e:
+            log(f"RSS源 {url} 抓取失败: {e}", "WARN")
+            continue
+    
+    log(f"成功抓取 {len(all_news)} 条RSS新闻", "SUCCESS")
+    return "\n".join(all_news[:8])
+
+def fetch_finnhub_news() -> str:
+    """从Finnhub抓取美股个股新闻（需要API Key）"""
+    if not FINNHUB_API_KEY:
+        log("FINNHUB_API_KEY 未配置，跳过个股新闻", "WARN")
+        return "（未配置Finnhub API Key，无法获取美股个股新闻）"
+    
+    log("正在抓取Finnhub个股新闻...", "INFO")
+    
+    symbols = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    from_date = (datetime.now().replace(day=datetime.now().day - 7)).strftime("%Y-%m-%d")
+    
+    all_news = []
+    for sym in symbols:
+        url = f"https://finnhub.io/api/v1/company-news?symbol={sym}&from={from_date}&to={today}&token={FINNHUB_API_KEY}"
+        try:
+            resp = requests.get(url, timeout=10).json()
+            for item in resp[:2]:
+                headline = item.get('headline', '')
+                if headline:
+                    all_news.append(f"• {sym}: {headline}")
+            time.sleep(0.3)
+        except Exception as e:
+            log(f"{sym} 新闻抓取失败: {e}", "WARN")
+            continue
+    
+    log(f"成功抓取 {len(all_news)} 条个股新闻", "SUCCESS")
+    return "\n".join(all_news[:10])
+
+def fetch_all_news() -> str:
+    """汇总所有新闻"""
+    rss_news = fetch_rss_news()
+    finnhub_news = fetch_finnhub_news()
+    
+    combined = []
+    if rss_news:
+        combined.append("【RSS美股宏观新闻】")
+        combined.append(rss_news)
+    if finnhub_news and "未配置" not in finnhub_news:
+        combined.append("【Finnhub个股新闻】")
+        combined.append(finnhub_news)
+    
+    return "\n\n".join(combined) if combined else "（今日暂无美股新闻）"
+
+# ====================================================================
+#  数据获取（ETF资金流向）
 # ====================================================================
 
 def fetch_nasdaq_etf_flow() -> Dict:
@@ -67,55 +143,51 @@ def fetch_nasdaq_etf_flow() -> Dict:
         log(f"ETF数据获取失败: {e}", "ERROR")
     return result
 
-def fetch_all_data() -> Dict:
+def fetch_all_data() -> Tuple[Dict, str]:
     log("=" * 50, "INFO")
     log("🚀 开始抓取数据...", "INFO")
+    
     etf_data = fetch_nasdaq_etf_flow()
+    news_text = fetch_all_news()
+    
     log("✅ 数据抓取完成", "SUCCESS")
     log("=" * 50, "INFO")
-    return etf_data
+    return etf_data, news_text
 
 # ====================================================================
-#  DeepSeek 深度分析（升级版提示词）
+#  DeepSeek 分析（升级版：加入新闻）
 # ====================================================================
 
-def build_prompt(etf_text: str) -> Tuple[str, str]:
+def build_prompt(etf_text: str, news_text: str) -> Tuple[str, str]:
     system_prompt = """你是一位拥有10年经验的美股ETF策略分析师，擅长深度解读市场信号。
 
 ## 任务
-根据纳指ETF资金流向数据，撰写一篇有深度的财经短评。
+根据纳指ETF资金流向数据 和 美股新闻，撰写一篇有深度的财经短评。
 
-## 深度分析要求（重要）
-1. 不只是描述数据，要挖掘数据背后的逻辑。例如：
-   - 某只ETF成交额异常放大但价格微跌 → 多空分歧加剧，谁在买、谁在卖？
-   - 资金从传统纳指ETF流向生物科技ETF → 板块轮动开始，驱动力是什么？
-2. 引入历史对比。例如：当前成交额/资金流向与过去一周、一个月相比处于什么水平？
-3. 引入估值视角。例如：纳指当前估值分位数如何？资金流向与估值是否匹配？
-4. 推演后市逻辑。例如：如果某类资金持续流入/流出，未来1-2周可能出现什么局面？
-5. 给出明确的操作逻辑，而非模糊建议。
-
-## 文章结构（纯文本，不要用## **等符号）
-第一段：今日资金流向核心信号（最关键的1-2个数据点）
-第二段：深度解读——数据背后的多空逻辑与板块轮动
-第三段：历史视角与估值参考
-第四段：后市推演与操作启示
+## 分析要求
+1. 结合ETF资金流向和新闻事件，分析市场逻辑
+2. 挖掘数据背后的多空博弈、板块轮动
+3. 引入历史对比和估值视角
+4. 推演后市逻辑，给出操作启示
 
 ## 格式要求
-- 不要使用任何 Markdown 符号（如 ## ** > - 等）
-- 不要使用编号列表
+- 不要使用 ## ** > - 等任何Markdown符号
 - 直接用自然段落输出，段落间用空行分隔
 - 文章末尾另起一行，用 【标题】 标注一个25-35字的钩子标题
 
 ## 文风
-专业、犀利、有洞察力，像跟资深投资者聊天。"""
+专业、犀利、有洞察力。"""
 
-    user_content = f"""请根据以下今日数据撰写深度分析文章：
+    user_content = f"""请根据以下今日数据和新闻，撰写深度分析文章：
 
 【纳指ETF资金流向】
 {etf_text}
 
+【美股新闻】
+{news_text}
+
 【数据说明】
-以上数据来自东方财富公开数据，包含今日纳指相关ETF的成交额、涨跌幅等信息。请结合这些数据，运用你的专业知识进行深度解读。"""
+ETF数据来自东方财富网公开数据。新闻来自Yahoo Finance、Nasdaq.com、MarketWatch等公开RSS源，以及Finnhub API。"""
     return system_prompt, user_content
 
 def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> Tuple[bool, str, str]:
@@ -127,7 +199,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
         "model": "deepseek-chat",
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
         "temperature": 0.7,
-        "max_tokens": 2500
+        "max_tokens": 3000
     }
     for attempt in range(1, max_retries + 1):
         try:
@@ -201,19 +273,21 @@ def push_to_wechat(title: str, content: str) -> bool:
         return False
 
 # ====================================================================
-#  生成数据来源声明
+#  数据来源声明
 # ====================================================================
 
 def build_data_source() -> str:
-    """生成数据来源和法律声明"""
     today = datetime.now().strftime("%Y年%m月%d日")
     return f"""
 
 ---
 【数据来源声明】
-本文数据来源于东方财富网（https://www.eastmoney.com）公开披露的ETF行情数据，数据日期为{today}。
+本文数据来源包括：
+1. ETF资金流向数据：东方财富网（https://www.eastmoney.com）
+2. 美股新闻：Yahoo Finance、Nasdaq.com、MarketWatch 公开RSS源，以及 Finnhub API
+
+数据日期：{today}
 本文由AI辅助生成，内容仅供参考，不构成投资建议。投资有风险，入市需谨慎。
-如需引用本文数据，请注明数据来源为东方财富网。
 """
 
 # ====================================================================
@@ -222,7 +296,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v1.9")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.0")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
@@ -230,10 +304,10 @@ def main():
         log("⚠️ DEEPSEEK_API_KEY 未设置！", "ERROR")
         sys.exit(1)
 
-    etf_data = fetch_all_data()
+    etf_data, news_text = fetch_all_data()
     etf_text = etf_data["data"] or "（纳指ETF数据暂缺）"
 
-    system_prompt, user_content = build_prompt(etf_text)
+    system_prompt, user_content = build_prompt(etf_text, news_text)
     success, title, article = call_deepseek(system_prompt, user_content)
 
     if not success:
@@ -245,7 +319,6 @@ def main():
 请检查 DeepSeek API 配置。"""
         title = "简报生成异常"
 
-    # 添加数据来源声明
     full_article = article + build_data_source()
 
     if ENABLE_PRINT_PREVIEW:
