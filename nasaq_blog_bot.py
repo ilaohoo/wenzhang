@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v1.6
-优化：美股数据获取加超时控制，防止卡死
+纳斯达克100博客自动写作机器人 v1.9
+深度分析版：引入估值、历史对比、逻辑推演，自动标注数据来源
 """
 
 import akshare as ak
@@ -13,7 +13,6 @@ import sys
 import os
 from datetime import datetime
 from typing import Dict, Tuple, List
-import concurrent.futures
 
 # ====================================================================
 #  配置
@@ -21,8 +20,6 @@ import concurrent.futures
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
-
-MAGNIFICENT_7: List[str] = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
 
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
@@ -70,105 +67,55 @@ def fetch_nasdaq_etf_flow() -> Dict:
         log(f"ETF数据获取失败: {e}", "ERROR")
     return result
 
-def fetch_us_stocks_with_timeout(symbols: List[str], timeout: int = 60) -> Dict:
-    """
-    带超时控制的美股行情获取
-    如果60秒内没完成，返回错误信息并继续
-    """
-    result = {"status": "success", "data": "", "error": None}
-
-    def _fetch():
-        try:
-            log(f"正在获取美股行情（超时限制 {timeout} 秒）...", "INFO")
-            all_stocks = ak.stock_us_spot()
-            matched = []
-            for symbol in symbols:
-                mask = all_stocks['代码'].str.upper() == symbol.upper()
-                stock = all_stocks[mask]
-                if not stock.empty:
-                    row = stock.iloc[0]
-                    price = row.get('最新价', 'N/A')
-                    change_pct = row.get('涨跌幅', 'N/A')
-                    matched.append({"symbol": symbol.upper(), "price": price, "change_pct": change_pct})
-                else:
-                    matched.append({"symbol": symbol.upper(), "price": "N/A", "change_pct": "N/A"})
-            return matched
-        except Exception as e:
-            raise e
-
-    try:
-        # 使用线程池执行，带超时
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_fetch)
-            matched = future.result(timeout=timeout)
-
-        lines = []
-        for m in matched:
-            if m["price"] != "N/A":
-                pct = m["change_pct"]
-                if isinstance(pct, (int, float)):
-                    sign = "+" if pct > 0 else ""
-                    pct_str = f"{sign}{pct:.2f}%"
-                else:
-                    pct_str = str(pct)
-                lines.append(f"• {m['symbol']}: ${m['price']}  ({pct_str})")
-            else:
-                lines.append(f"• {m['symbol']}: 数据暂缺")
-        result["data"] = "\n".join(lines)
-        log("成功获取美股行情数据", "SUCCESS")
-
-    except concurrent.futures.TimeoutError:
-        result["status"] = "error"
-        result["error"] = "美股数据获取超时"
-        result["data"] = "• 美股行情获取超时，请稍后重试\n• 建议：可在非交易时段运行"
-        log("美股行情获取超时（超过60秒）", "WARN")
-    except Exception as e:
-        result["status"] = "error"
-        result["error"] = str(e)
-        result["data"] = f"• 美股行情获取失败: {str(e)[:50]}"
-        log(f"美股行情获取失败: {e}", "ERROR")
-
-    return result
-
-def fetch_all_data() -> Tuple[Dict, Dict]:
+def fetch_all_data() -> Dict:
     log("=" * 50, "INFO")
     log("🚀 开始抓取数据...", "INFO")
-
     etf_data = fetch_nasdaq_etf_flow()
-    stock_data = fetch_us_stocks_with_timeout(MAGNIFICENT_7, timeout=60)
-
     log("✅ 数据抓取完成", "SUCCESS")
     log("=" * 50, "INFO")
-    return etf_data, stock_data
+    return etf_data
 
 # ====================================================================
-#  DeepSeek 分析与写作
+#  DeepSeek 深度分析（升级版提示词）
 # ====================================================================
 
-def build_prompt(etf_text: str, stock_text: str) -> Tuple[str, str]:
-    system_prompt = """你是一位拥有10年经验的美股ETF策略分析师。
+def build_prompt(etf_text: str) -> Tuple[str, str]:
+    system_prompt = """你是一位拥有10年经验的美股ETF策略分析师，擅长深度解读市场信号。
 
 ## 任务
-根据纳指ETF资金流向和七巨头行情数据，撰写一篇财经短评。
+根据纳指ETF资金流向数据，撰写一篇有深度的财经短评。
 
-## 文章结构
-1. **聪明钱动向**：分析主力资金流向和信号强度。
-2. **巨头轮动分析**：对比七只权重股表现，指出领涨领跌及轮动逻辑。
-3. **核心结论**：总结交易逻辑，给出操作启示。
+## 深度分析要求（重要）
+1. 不只是描述数据，要挖掘数据背后的逻辑。例如：
+   - 某只ETF成交额异常放大但价格微跌 → 多空分歧加剧，谁在买、谁在卖？
+   - 资金从传统纳指ETF流向生物科技ETF → 板块轮动开始，驱动力是什么？
+2. 引入历史对比。例如：当前成交额/资金流向与过去一周、一个月相比处于什么水平？
+3. 引入估值视角。例如：纳指当前估值分位数如何？资金流向与估值是否匹配？
+4. 推演后市逻辑。例如：如果某类资金持续流入/流出，未来1-2周可能出现什么局面？
+5. 给出明确的操作逻辑，而非模糊建议。
+
+## 文章结构（纯文本，不要用## **等符号）
+第一段：今日资金流向核心信号（最关键的1-2个数据点）
+第二段：深度解读——数据背后的多空逻辑与板块轮动
+第三段：历史视角与估值参考
+第四段：后市推演与操作启示
+
+## 格式要求
+- 不要使用任何 Markdown 符号（如 ## ** > - 等）
+- 不要使用编号列表
+- 直接用自然段落输出，段落间用空行分隔
+- 文章末尾另起一行，用 【标题】 标注一个25-35字的钩子标题
 
 ## 文风
-专业但不晦涩，数据说话，适当使用比喻。最后用 **【标题】** 标注一个25-35字的钩子标题。"""
+专业、犀利、有洞察力，像跟资深投资者聊天。"""
 
-    user_content = f"""请根据以下今日数据撰写分析文章：
+    user_content = f"""请根据以下今日数据撰写深度分析文章：
 
----
 【纳指ETF资金流向】
 {etf_text}
 
-【七巨头实时行情】
-{stock_text}
----
-"""
+【数据说明】
+以上数据来自东方财富公开数据，包含今日纳指相关ETF的成交额、涨跌幅等信息。请结合这些数据，运用你的专业知识进行深度解读。"""
     return system_prompt, user_content
 
 def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> Tuple[bool, str, str]:
@@ -179,13 +126,13 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
-        "temperature": 0.6,
-        "max_tokens": 2000
+        "temperature": 0.7,
+        "max_tokens": 2500
     }
     for attempt in range(1, max_retries + 1):
         try:
             log(f"正在调用DeepSeek API... (第{attempt}次)", "INFO")
-            response = requests.post(url, headers=headers, json=payload, timeout=45)
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
             result = response.json()
             full_text = result['choices'][0]['message']['content']
@@ -194,7 +141,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
                 parts = full_text.split("【标题】")
                 if len(parts) > 1:
                     raw_title = parts[-1].strip()
-                    title = raw_title.split("\n")[0].strip().replace("】", "")
+                    title = raw_title.split("\n")[0].strip()
                     if not title:
                         title = "📊 纳指每日简报"
             log("✅ DeepSeek分析完成", "SUCCESS")
@@ -223,7 +170,7 @@ def push_to_wechat(title: str, content: str) -> bool:
         "token": PUSHPLUS_TOKEN,
         "title": title[:100],
         "content": content,
-        "template": "markdown"
+        "template": "txt"
     }
 
     try:
@@ -254,12 +201,28 @@ def push_to_wechat(title: str, content: str) -> bool:
         return False
 
 # ====================================================================
+#  生成数据来源声明
+# ====================================================================
+
+def build_data_source() -> str:
+    """生成数据来源和法律声明"""
+    today = datetime.now().strftime("%Y年%m月%d日")
+    return f"""
+
+---
+【数据来源声明】
+本文数据来源于东方财富网（https://www.eastmoney.com）公开披露的ETF行情数据，数据日期为{today}。
+本文由AI辅助生成，内容仅供参考，不构成投资建议。投资有风险，入市需谨慎。
+如需引用本文数据，请注明数据来源为东方财富网。
+"""
+
+# ====================================================================
 #  主程序
 # ====================================================================
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v1.6")
+    print("  📈 纳斯达克100 博客自动写作机器人 v1.9")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
@@ -267,43 +230,42 @@ def main():
         log("⚠️ DEEPSEEK_API_KEY 未设置！", "ERROR")
         sys.exit(1)
 
-    etf_data, stock_data = fetch_all_data()
+    etf_data = fetch_all_data()
     etf_text = etf_data["data"] or "（纳指ETF数据暂缺）"
-    stock_text = stock_data["data"] or "（七巨头行情数据暂缺）"
 
-    system_prompt, user_content = build_prompt(etf_text, stock_text)
+    system_prompt, user_content = build_prompt(etf_text)
     success, title, article = call_deepseek(system_prompt, user_content)
 
     if not success:
-        article = f"""# ⚠️ 今日简报生成失败
+        article = f"""今日简报生成失败
 
-**数据情况**：
-- 纳指ETF：{etf_text[:200]}
-- 七巨头：{stock_text[:200]}
+数据情况：
+纳指ETF：{etf_text[:200]}
 
-请检查 DeepSeek API 配置。
-"""
-        title = "⚠️ 简报生成异常"
+请检查 DeepSeek API 配置。"""
+        title = "简报生成异常"
+
+    # 添加数据来源声明
+    full_article = article + build_data_source()
 
     if ENABLE_PRINT_PREVIEW:
         print("\n" + "=" * 60)
-        print(f"📌 标题：{title}")
+        print(f"标题：{title}")
         print("=" * 60)
-        print(article)
+        print(full_article)
         print("=" * 60 + "\n")
 
-    # 保存文章
     with open("briefing.md", "w", encoding="utf-8") as f:
-        f.write(f"# {title}\n\n{article}")
+        f.write(f"{title}\n\n{full_article}")
 
-    push_success = push_to_wechat(title, article)
+    push_success = push_to_wechat(title, full_article)
 
     print("\n" + "=" * 60)
     if push_success:
-        print("  🎉 任务执行完毕！请查看微信消息。")
+        print("  任务执行完毕！请查看微信消息。")
     else:
-        print("  ⚠️ 任务执行完毕，但微信推送未成功。")
-        print("  📄 文章已保存到 briefing.md")
+        print("  任务执行完毕，但微信推送未成功。")
+        print("  文章已保存到 briefing.md")
     print("=" * 60 + "\n")
 
     sys.exit(0 if push_success else 1)
