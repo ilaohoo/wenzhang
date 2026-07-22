@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v2.1
-终极极速版：不调用 stock_us_spot()，只依赖ETF数据+新闻RSS
+纳斯达克100博客自动写作机器人 v2.2
+极速版：所有外部请求带超时控制
 """
 
 import akshare as ak
@@ -14,6 +14,10 @@ import os
 import feedparser
 from datetime import datetime
 from typing import Dict, Tuple, List
+import socket
+
+# 设置全局超时
+socket.setdefaulttimeout(15)
 
 # ====================================================================
 #  配置
@@ -44,11 +48,11 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"{prefix}[{timestamp}] {msg}{suffix}")
 
 # ====================================================================
-#  新闻抓取模块
+#  新闻抓取模块（带超时）
 # ====================================================================
 
 def fetch_rss_news() -> str:
-    """从RSS源抓取美股新闻"""
+    """从RSS源抓取美股新闻（带超时）"""
     log("正在抓取RSS新闻...", "INFO")
     
     feeds = [
@@ -59,21 +63,23 @@ def fetch_rss_news() -> str:
     all_news = []
     for url in feeds:
         try:
+            # feedparser 本身会受 socket 超时影响
             feed = feedparser.parse(url)
             for entry in feed.entries[:3]:
                 title = entry.title
                 if title not in all_news:
                     all_news.append(f"• {title}")
         except Exception as e:
-            log(f"RSS源 {url} 抓取失败: {e}", "WARN")
+            log(f"RSS源 {url} 抓取超时，跳过", "WARN")
             continue
     
     log(f"成功抓取 {len(all_news)} 条RSS新闻", "SUCCESS")
     return "\n".join(all_news[:8])
 
 def fetch_finnhub_news() -> str:
-    """从Finnhub抓取美股个股新闻（可选）"""
+    """从Finnhub抓取美股个股新闻"""
     if not FINNHUB_API_KEY:
+        log("FINNHUB_API_KEY 未配置，跳过", "WARN")
         return ""
     
     log("正在抓取Finnhub个股新闻...", "INFO")
@@ -84,8 +90,8 @@ def fetch_finnhub_news() -> str:
     
     all_news = []
     for sym in symbols:
-        url = f"https://finnhub.io/api/v1/company-news?symbol={sym}&from={from_date}&to={today}&token={FINNHUB_API_KEY}"
         try:
+            url = f"https://finnhub.io/api/v1/company-news?symbol={sym}&from={from_date}&to={today}&token={FINNHUB_API_KEY}"
             resp = requests.get(url, timeout=10).json()
             for item in resp[:2]:
                 headline = item.get('headline', '')
@@ -115,7 +121,7 @@ def fetch_all_news() -> str:
     return "\n\n".join(combined) if combined else "（今日暂无美股新闻）"
 
 # ====================================================================
-#  数据获取（仅ETF资金流向，不获取美股行情）
+#  数据获取（仅ETF资金流向）
 # ====================================================================
 
 def fetch_nasdaq_etf_flow() -> Dict:
@@ -184,7 +190,7 @@ def build_prompt(etf_text: str, news_text: str) -> Tuple[str, str]:
 """
     return system_prompt, user_content
 
-def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> Tuple[bool, str, str]:
+def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 2) -> Tuple[bool, str, str]:
     if not DEEPSEEK_API_KEY:
         return False, "配置错误", "DEEPSEEK_API_KEY 未设置"
     url = "https://api.deepseek.com/v1/chat/completions"
@@ -198,7 +204,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
     for attempt in range(1, max_retries + 1):
         try:
             log(f"正在调用DeepSeek API... (第{attempt}次)", "INFO")
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response = requests.post(url, headers=headers, json=payload, timeout=45)
             response.raise_for_status()
             result = response.json()
             full_text = result['choices'][0]['message']['content']
@@ -215,7 +221,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
         except Exception as e:
             log(f"API调用失败 (第{attempt}次): {e}", "WARN")
             if attempt < max_retries:
-                time.sleep(3)
+                time.sleep(2)
     return False, "API调用失败", "DeepSeek API 多次重试后失败。"
 
 # ====================================================================
@@ -224,46 +230,29 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
 
 def push_to_wechat(title: str, content: str) -> bool:
     if not ENABLE_PUSH:
-        log("推送已禁用", "WARN")
         return True
-
     if not PUSHPLUS_TOKEN:
         log("PUSHPLUS_TOKEN 未配置，跳过推送", "WARN")
         return False
 
     url = "https://www.pushplus.plus/send"
-    params = {
-        "token": PUSHPLUS_TOKEN,
-        "title": title[:100],
-        "content": content,
-        "template": "txt"
-    }
+    params = {"token": PUSHPLUS_TOKEN, "title": title[:100], "content": content, "template": "txt"}
 
     try:
         log("正在推送至微信...", "INFO")
         response = requests.get(url, params=params, timeout=15)
-
         if response.status_code != 200:
-            log(f"❌ 推送失败，HTTP状态码: {response.status_code}", "ERROR")
+            log(f"推送失败，HTTP状态码: {response.status_code}", "ERROR")
             return False
-
-        try:
-            resp_json = response.json()
-            if resp_json.get('code') == 200:
-                log("✅ 微信推送成功！", "SUCCESS")
-                return True
-            else:
-                log(f"❌ 推送失败: {resp_json.get('msg', resp_json)}", "ERROR")
-                return False
-        except ValueError:
-            log(f"❌ 响应异常: {response.text[:200]}", "ERROR")
+        resp_json = response.json()
+        if resp_json.get('code') == 200:
+            log("✅ 微信推送成功！", "SUCCESS")
+            return True
+        else:
+            log(f"推送失败: {resp_json.get('msg', resp_json)}", "ERROR")
             return False
-
-    except requests.exceptions.Timeout:
-        log("❌ 推送超时", "ERROR")
-        return False
     except Exception as e:
-        log(f"❌ 推送异常: {e}", "ERROR")
+        log(f"推送异常: {e}", "ERROR")
         return False
 
 # ====================================================================
@@ -278,7 +267,7 @@ def build_data_source() -> str:
 【数据来源声明】
 本文数据来源：
 1. ETF资金流向：东方财富网（https://www.eastmoney.com）
-2. 美股新闻：Yahoo Finance、Nasdaq.com 公开RSS源
+2. 美股新闻：Yahoo Finance、Nasdaq.com 公开RSS源，Finnhub API（如已配置）
 
 数据日期：{today}
 本文由AI辅助生成，仅供参考，不构成投资建议。
@@ -290,7 +279,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v2.1")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.2")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
@@ -305,10 +294,7 @@ def main():
     success, title, article = call_deepseek(system_prompt, user_content)
 
     if not success:
-        article = f"""今日简报生成失败
-
-数据情况：{etf_text[:200]}
-请检查配置。"""
+        article = f"今日简报生成失败\n\n数据情况：{etf_text[:200]}"
         title = "简报生成异常"
 
     full_article = article + build_data_source()
