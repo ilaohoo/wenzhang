@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v1.5
-修复：增强推送调试信息
+纳斯达克100博客自动写作机器人 v1.6
+优化：美股数据获取加超时控制，防止卡死
 """
 
 import akshare as ak
@@ -13,18 +13,17 @@ import sys
 import os
 from datetime import datetime
 from typing import Dict, Tuple, List
+import concurrent.futures
 
 # ====================================================================
-#  配置（环境变量自动读取）
+#  配置
 # ====================================================================
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
 
-# 要追踪的七巨头股票代码
 MAGNIFICENT_7: List[str] = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
 
-# 功能开关
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
 
@@ -71,23 +70,38 @@ def fetch_nasdaq_etf_flow() -> Dict:
         log(f"ETF数据获取失败: {e}", "ERROR")
     return result
 
-def fetch_us_stocks_spot(symbols: List[str]) -> Dict:
+def fetch_us_stocks_with_timeout(symbols: List[str], timeout: int = 60) -> Dict:
+    """
+    带超时控制的美股行情获取
+    如果60秒内没完成，返回错误信息并继续
+    """
     result = {"status": "success", "data": "", "error": None}
+
+    def _fetch():
+        try:
+            log(f"正在获取美股行情（超时限制 {timeout} 秒）...", "INFO")
+            all_stocks = ak.stock_us_spot()
+            matched = []
+            for symbol in symbols:
+                mask = all_stocks['代码'].str.upper() == symbol.upper()
+                stock = all_stocks[mask]
+                if not stock.empty:
+                    row = stock.iloc[0]
+                    price = row.get('最新价', 'N/A')
+                    change_pct = row.get('涨跌幅', 'N/A')
+                    matched.append({"symbol": symbol.upper(), "price": price, "change_pct": change_pct})
+                else:
+                    matched.append({"symbol": symbol.upper(), "price": "N/A", "change_pct": "N/A"})
+            return matched
+        except Exception as e:
+            raise e
+
     try:
-        log(f"正在获取 {len(symbols)} 只美股行情...", "INFO")
-        all_stocks = ak.stock_us_spot()
-        matched = []
-        for symbol in symbols:
-            mask = all_stocks['代码'].str.upper() == symbol.upper()
-            stock = all_stocks[mask]
-            if not stock.empty:
-                row = stock.iloc[0]
-                price = row.get('最新价', 'N/A')
-                change_pct = row.get('涨跌幅', 'N/A')
-                matched.append({"symbol": symbol.upper(), "price": price, "change_pct": change_pct})
-            else:
-                matched.append({"symbol": symbol.upper(), "price": "N/A", "change_pct": "N/A"})
-                log(f"{symbol} 未在行情列表中找到", "WARN")
+        # 使用线程池执行，带超时
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            matched = future.result(timeout=timeout)
+
         lines = []
         for m in matched:
             if m["price"] != "N/A":
@@ -102,17 +116,27 @@ def fetch_us_stocks_spot(symbols: List[str]) -> Dict:
                 lines.append(f"• {m['symbol']}: 数据暂缺")
         result["data"] = "\n".join(lines)
         log("成功获取美股行情数据", "SUCCESS")
+
+    except concurrent.futures.TimeoutError:
+        result["status"] = "error"
+        result["error"] = "美股数据获取超时"
+        result["data"] = "• 美股行情获取超时，请稍后重试\n• 建议：可在非交易时段运行"
+        log("美股行情获取超时（超过60秒）", "WARN")
     except Exception as e:
         result["status"] = "error"
         result["error"] = str(e)
+        result["data"] = f"• 美股行情获取失败: {str(e)[:50]}"
         log(f"美股行情获取失败: {e}", "ERROR")
+
     return result
 
 def fetch_all_data() -> Tuple[Dict, Dict]:
     log("=" * 50, "INFO")
     log("🚀 开始抓取数据...", "INFO")
+
     etf_data = fetch_nasdaq_etf_flow()
-    stock_data = fetch_us_stocks_spot(MAGNIFICENT_7)
+    stock_data = fetch_us_stocks_with_timeout(MAGNIFICENT_7, timeout=60)
+
     log("✅ 数据抓取完成", "SUCCESS")
     log("=" * 50, "INFO")
     return etf_data, stock_data
@@ -182,7 +206,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
     return False, "API调用失败", "DeepSeek API 多次重试后失败。"
 
 # ====================================================================
-#  PushPlus 微信推送（增强调试版）
+#  PushPlus 微信推送
 # ====================================================================
 
 def push_to_wechat(title: str, content: str) -> bool:
@@ -193,8 +217,6 @@ def push_to_wechat(title: str, content: str) -> bool:
     if not PUSHPLUS_TOKEN:
         log("PUSHPLUS_TOKEN 未配置，跳过推送", "WARN")
         return False
-
-    log(f"PUSHPLUS_TOKEN 长度: {len(PUSHPLUS_TOKEN)} 字符（前4位: {PUSHPLUS_TOKEN[:4]}...）", "INFO")
 
     url = "https://www.pushplus.plus/send"
     params = {
@@ -208,16 +230,10 @@ def push_to_wechat(title: str, content: str) -> bool:
         log("正在推送至微信...", "INFO")
         response = requests.get(url, params=params, timeout=15)
 
-        # 打印原始响应，帮助调试
-        log(f"HTTP状态码: {response.status_code}", "INFO")
-        log(f"响应内容(前200字符): {response.text[:200]}", "INFO")
-
-        # 如果状态码不是200，直接失败
         if response.status_code != 200:
             log(f"❌ 推送失败，HTTP状态码: {response.status_code}", "ERROR")
             return False
 
-        # 尝试解析JSON
         try:
             resp_json = response.json()
             if resp_json.get('code') == 200:
@@ -226,17 +242,15 @@ def push_to_wechat(title: str, content: str) -> bool:
             else:
                 log(f"❌ 推送失败: {resp_json.get('msg', resp_json)}", "ERROR")
                 return False
-        except ValueError as e:
-            # JSON解析失败，打印原始响应
-            log(f"❌ 响应不是有效JSON: {e}", "ERROR")
-            log(f"完整响应: {response.text[:500]}", "ERROR")
+        except ValueError:
+            log(f"❌ 响应异常: {response.text[:200]}", "ERROR")
             return False
 
     except requests.exceptions.Timeout:
         log("❌ 推送超时", "ERROR")
         return False
-    except requests.exceptions.RequestException as e:
-        log(f"❌ 推送请求异常: {e}", "ERROR")
+    except Exception as e:
+        log(f"❌ 推送异常: {e}", "ERROR")
         return False
 
 # ====================================================================
@@ -245,13 +259,9 @@ def push_to_wechat(title: str, content: str) -> bool:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v1.5")
+    print("  📈 纳斯达克100 博客自动写作机器人 v1.6")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
-
-    # 打印环境变量状态（调试用）
-    print(f"🔍 DEEPSEEK_API_KEY: {'已设置' if DEEPSEEK_API_KEY else '未设置'}")
-    print(f"🔍 PUSHPLUS_TOKEN: {'已设置' if PUSHPLUS_TOKEN else '未设置'}")
 
     if not DEEPSEEK_API_KEY:
         log("⚠️ DEEPSEEK_API_KEY 未设置！", "ERROR")
@@ -282,7 +292,7 @@ def main():
         print(article)
         print("=" * 60 + "\n")
 
-    # 保存文章到文件（方便查看）
+    # 保存文章
     with open("briefing.md", "w", encoding="utf-8") as f:
         f.write(f"# {title}\n\n{article}")
 
@@ -293,7 +303,7 @@ def main():
         print("  🎉 任务执行完毕！请查看微信消息。")
     else:
         print("  ⚠️ 任务执行完毕，但微信推送未成功。")
-        print("  📄 文章已保存到 briefing.md，可手动复制发布。")
+        print("  📄 文章已保存到 briefing.md")
     print("=" * 60 + "\n")
 
     sys.exit(0 if push_success else 1)
