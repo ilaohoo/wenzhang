@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v1.3
-适配：自动兼容 DEEPSEEK_API_KEY 和 DEEPSEEK_KEY 两种环境变量名
+纳斯达克100博客自动写作机器人 v1.5
+修复：增强推送调试信息
 """
 
 import akshare as ak
@@ -15,12 +15,11 @@ from datetime import datetime
 from typing import Dict, Tuple, List
 
 # ====================================================================
-#  配置（自动从环境变量读取，兼容两种命名）
+#  配置（环境变量自动读取）
 # ====================================================================
 
-# 尝试多个环境变量名，提高兼容性
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
-PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or os.environ.get("PUSHPLUS_TOKEN") or ""
+PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
 
 # 要追踪的七巨头股票代码
 MAGNIFICENT_7: List[str] = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
@@ -51,7 +50,6 @@ def log(msg: str, level: str = "INFO") -> None:
 # ====================================================================
 
 def fetch_nasdaq_etf_flow() -> Dict:
-    """获取A股市场纳指ETF资金流向"""
     result = {"status": "success", "data": "无数据", "error": None}
     try:
         log("正在获取纳指ETF资金流向...", "INFO")
@@ -74,7 +72,6 @@ def fetch_nasdaq_etf_flow() -> Dict:
     return result
 
 def fetch_us_stocks_spot(symbols: List[str]) -> Dict:
-    """获取美股实时行情"""
     result = {"status": "success", "data": "", "error": None}
     try:
         log(f"正在获取 {len(symbols)} 只美股行情...", "INFO")
@@ -152,7 +149,7 @@ def build_prompt(etf_text: str, stock_text: str) -> Tuple[str, str]:
 
 def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> Tuple[bool, str, str]:
     if not DEEPSEEK_API_KEY:
-        return False, "配置错误", "DEEPSEEK_API_KEY 未设置，请检查 GitHub Secrets 中的变量名是否为 DEEPSEEK_KEY 或 DEEPSEEK_API_KEY"
+        return False, "配置错误", "DEEPSEEK_API_KEY 未设置"
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -185,29 +182,61 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
     return False, "API调用失败", "DeepSeek API 多次重试后失败。"
 
 # ====================================================================
-#  PushPlus 微信推送
+#  PushPlus 微信推送（增强调试版）
 # ====================================================================
 
 def push_to_wechat(title: str, content: str) -> bool:
     if not ENABLE_PUSH:
         log("推送已禁用", "WARN")
         return True
+
     if not PUSHPLUS_TOKEN:
         log("PUSHPLUS_TOKEN 未配置，跳过推送", "WARN")
         return False
+
+    log(f"PUSHPLUS_TOKEN 长度: {len(PUSHPLUS_TOKEN)} 字符（前4位: {PUSHPLUS_TOKEN[:4]}...）", "INFO")
+
     url = "https://www.pushplus.plus/send"
-    params = {"token": PUSHPLUS_TOKEN, "title": title[:100], "content": content, "template": "markdown"}
+    params = {
+        "token": PUSHPLUS_TOKEN,
+        "title": title[:100],
+        "content": content,
+        "template": "markdown"
+    }
+
     try:
         log("正在推送至微信...", "INFO")
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.json().get('code') == 200:
-            log("✅ 微信推送成功！", "SUCCESS")
-            return True
-        else:
-            log(f"❌ 推送失败: {resp.text}", "ERROR")
+        response = requests.get(url, params=params, timeout=15)
+
+        # 打印原始响应，帮助调试
+        log(f"HTTP状态码: {response.status_code}", "INFO")
+        log(f"响应内容(前200字符): {response.text[:200]}", "INFO")
+
+        # 如果状态码不是200，直接失败
+        if response.status_code != 200:
+            log(f"❌ 推送失败，HTTP状态码: {response.status_code}", "ERROR")
             return False
-    except Exception as e:
-        log(f"❌ 推送异常: {e}", "ERROR")
+
+        # 尝试解析JSON
+        try:
+            resp_json = response.json()
+            if resp_json.get('code') == 200:
+                log("✅ 微信推送成功！", "SUCCESS")
+                return True
+            else:
+                log(f"❌ 推送失败: {resp_json.get('msg', resp_json)}", "ERROR")
+                return False
+        except ValueError as e:
+            # JSON解析失败，打印原始响应
+            log(f"❌ 响应不是有效JSON: {e}", "ERROR")
+            log(f"完整响应: {response.text[:500]}", "ERROR")
+            return False
+
+    except requests.exceptions.Timeout:
+        log("❌ 推送超时", "ERROR")
+        return False
+    except requests.exceptions.RequestException as e:
+        log(f"❌ 推送请求异常: {e}", "ERROR")
         return False
 
 # ====================================================================
@@ -216,12 +245,16 @@ def push_to_wechat(title: str, content: str) -> bool:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v1.3")
+    print("  📈 纳斯达克100 博客自动写作机器人 v1.5")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
+    # 打印环境变量状态（调试用）
+    print(f"🔍 DEEPSEEK_API_KEY: {'已设置' if DEEPSEEK_API_KEY else '未设置'}")
+    print(f"🔍 PUSHPLUS_TOKEN: {'已设置' if PUSHPLUS_TOKEN else '未设置'}")
+
     if not DEEPSEEK_API_KEY:
-        log("⚠️ DEEPSEEK_API_KEY 未设置！请在 GitHub Secrets 中配置 DEEPSEEK_KEY 或 DEEPSEEK_API_KEY。", "ERROR")
+        log("⚠️ DEEPSEEK_API_KEY 未设置！", "ERROR")
         sys.exit(1)
 
     etf_data, stock_data = fetch_all_data()
@@ -249,6 +282,10 @@ def main():
         print(article)
         print("=" * 60 + "\n")
 
+    # 保存文章到文件（方便查看）
+    with open("briefing.md", "w", encoding="utf-8") as f:
+        f.write(f"# {title}\n\n{article}")
+
     push_success = push_to_wechat(title, article)
 
     print("\n" + "=" * 60)
@@ -256,6 +293,7 @@ def main():
         print("  🎉 任务执行完毕！请查看微信消息。")
     else:
         print("  ⚠️ 任务执行完毕，但微信推送未成功。")
+        print("  📄 文章已保存到 briefing.md，可手动复制发布。")
     print("=" * 60 + "\n")
 
     sys.exit(0 if push_success else 1)
