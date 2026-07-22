@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v1.2
-适配 GitHub Actions，密钥从环境变量读取
+纳斯达克100博客自动写作机器人 v1.3
+适配：自动兼容 DEEPSEEK_API_KEY 和 DEEPSEEK_KEY 两种环境变量名
 """
 
 import akshare as ak
@@ -15,18 +15,19 @@ from datetime import datetime
 from typing import Dict, Tuple, List
 
 # ====================================================================
-#  配置（自动从环境变量读取，无需手动修改）
+#  配置（自动从环境变量读取，兼容两种命名）
 # ====================================================================
 
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "")
+# 尝试多个环境变量名，提高兼容性
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
+PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or os.environ.get("PUSHPLUS_TOKEN") or ""
 
 # 要追踪的七巨头股票代码
 MAGNIFICENT_7: List[str] = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
 
 # 功能开关
-ENABLE_PUSH: bool = True          # 是否推送微信
-ENABLE_PRINT_PREVIEW: bool = True # 是否控制台预览
+ENABLE_PUSH: bool = True
+ENABLE_PRINT_PREVIEW: bool = True
 
 # ====================================================================
 #  工具函数
@@ -46,7 +47,7 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"{prefix}[{timestamp}] {msg}{suffix}")
 
 # ====================================================================
-#  第一步：数据获取
+#  数据获取
 # ====================================================================
 
 def fetch_nasdaq_etf_flow() -> Dict:
@@ -73,7 +74,7 @@ def fetch_nasdaq_etf_flow() -> Dict:
     return result
 
 def fetch_us_stocks_spot(symbols: List[str]) -> Dict:
-    """获取美股实时行情（使用 stock_us_spot，一次性获取全部）"""
+    """获取美股实时行情"""
     result = {"status": "success", "data": "", "error": None}
     try:
         log(f"正在获取 {len(symbols)} 只美股行情...", "INFO")
@@ -120,7 +121,7 @@ def fetch_all_data() -> Tuple[Dict, Dict]:
     return etf_data, stock_data
 
 # ====================================================================
-#  第二步：DeepSeek 分析与写作
+#  DeepSeek 分析与写作
 # ====================================================================
 
 def build_prompt(etf_text: str, stock_text: str) -> Tuple[str, str]:
@@ -151,7 +152,7 @@ def build_prompt(etf_text: str, stock_text: str) -> Tuple[str, str]:
 
 def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> Tuple[bool, str, str]:
     if not DEEPSEEK_API_KEY:
-        return False, "配置错误", "DEEPSEEK_API_KEY 未设置，请检查 GitHub Secrets"
+        return False, "配置错误", "DEEPSEEK_API_KEY 未设置，请检查 GitHub Secrets 中的变量名是否为 DEEPSEEK_KEY 或 DEEPSEEK_API_KEY"
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -184,7 +185,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
     return False, "API调用失败", "DeepSeek API 多次重试后失败。"
 
 # ====================================================================
-#  第三步：PushPlus 微信推送
+#  PushPlus 微信推送
 # ====================================================================
 
 def push_to_wechat(title: str, content: str) -> bool:
@@ -215,12 +216,12 @@ def push_to_wechat(title: str, content: str) -> bool:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v1.2")
+    print("  📈 纳斯达克100 博客自动写作机器人 v1.3")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
     if not DEEPSEEK_API_KEY:
-        log("⚠️ DEEPSEEK_API_KEY 未设置！请在 GitHub Secrets 中配置。", "ERROR")
+        log("⚠️ DEEPSEEK_API_KEY 未设置！请在 GitHub Secrets 中配置 DEEPSEEK_KEY 或 DEEPSEEK_API_KEY。", "ERROR")
         sys.exit(1)
 
     etf_data, stock_data = fetch_all_data()
