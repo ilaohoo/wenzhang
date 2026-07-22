@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v2.0
-增加美股新闻抓取（RSS + Finnhub）
+纳斯达克100博客自动写作机器人 v2.1
+终极极速版：不调用 stock_us_spot()，只依赖ETF数据+新闻RSS
 """
 
 import akshare as ak
@@ -21,7 +21,7 @@ from typing import Dict, Tuple, List
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY") or ""  # 新增：Finnhub API Key
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY") or ""
 
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
@@ -44,7 +44,7 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"{prefix}[{timestamp}] {msg}{suffix}")
 
 # ====================================================================
-#  新闻抓取模块（新增）
+#  新闻抓取模块
 # ====================================================================
 
 def fetch_rss_news() -> str:
@@ -54,7 +54,6 @@ def fetch_rss_news() -> str:
     feeds = [
         "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^IXIC",
         "https://www.nasdaq.com/feed/rssoutbound",
-        "https://www.marketwatch.com/rss/headline?type=stock&source=nasdaq"
     ]
     
     all_news = []
@@ -63,7 +62,6 @@ def fetch_rss_news() -> str:
             feed = feedparser.parse(url)
             for entry in feed.entries[:3]:
                 title = entry.title
-                # 去重
                 if title not in all_news:
                     all_news.append(f"• {title}")
         except Exception as e:
@@ -74,16 +72,15 @@ def fetch_rss_news() -> str:
     return "\n".join(all_news[:8])
 
 def fetch_finnhub_news() -> str:
-    """从Finnhub抓取美股个股新闻（需要API Key）"""
+    """从Finnhub抓取美股个股新闻（可选）"""
     if not FINNHUB_API_KEY:
-        log("FINNHUB_API_KEY 未配置，跳过个股新闻", "WARN")
-        return "（未配置Finnhub API Key，无法获取美股个股新闻）"
+        return ""
     
     log("正在抓取Finnhub个股新闻...", "INFO")
     
-    symbols = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+    symbols = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
     today = datetime.now().strftime("%Y-%m-%d")
-    from_date = (datetime.now().replace(day=datetime.now().day - 7)).strftime("%Y-%m-%d")
+    from_date = (datetime.now().replace(day=datetime.now().day - 3)).strftime("%Y-%m-%d")
     
     all_news = []
     for sym in symbols:
@@ -94,7 +91,7 @@ def fetch_finnhub_news() -> str:
                 headline = item.get('headline', '')
                 if headline:
                     all_news.append(f"• {sym}: {headline}")
-            time.sleep(0.3)
+            time.sleep(0.2)
         except Exception as e:
             log(f"{sym} 新闻抓取失败: {e}", "WARN")
             continue
@@ -109,16 +106,16 @@ def fetch_all_news() -> str:
     
     combined = []
     if rss_news:
-        combined.append("【RSS美股宏观新闻】")
+        combined.append("【美股宏观新闻】")
         combined.append(rss_news)
-    if finnhub_news and "未配置" not in finnhub_news:
-        combined.append("【Finnhub个股新闻】")
+    if finnhub_news:
+        combined.append("【美股个股新闻】")
         combined.append(finnhub_news)
     
     return "\n\n".join(combined) if combined else "（今日暂无美股新闻）"
 
 # ====================================================================
-#  数据获取（ETF资金流向）
+#  数据获取（仅ETF资金流向，不获取美股行情）
 # ====================================================================
 
 def fetch_nasdaq_etf_flow() -> Dict:
@@ -155,20 +152,19 @@ def fetch_all_data() -> Tuple[Dict, str]:
     return etf_data, news_text
 
 # ====================================================================
-#  DeepSeek 分析（升级版：加入新闻）
+#  DeepSeek 分析
 # ====================================================================
 
 def build_prompt(etf_text: str, news_text: str) -> Tuple[str, str]:
-    system_prompt = """你是一位拥有10年经验的美股ETF策略分析师，擅长深度解读市场信号。
+    system_prompt = """你是一位拥有10年经验的美股ETF策略分析师。
 
 ## 任务
-根据纳指ETF资金流向数据 和 美股新闻，撰写一篇有深度的财经短评。
+根据纳指ETF资金流向和美股新闻，撰写一篇深度财经短评。
 
 ## 分析要求
 1. 结合ETF资金流向和新闻事件，分析市场逻辑
 2. 挖掘数据背后的多空博弈、板块轮动
-3. 引入历史对比和估值视角
-4. 推演后市逻辑，给出操作启示
+3. 推演后市逻辑，给出操作启示
 
 ## 格式要求
 - 不要使用 ## ** > - 等任何Markdown符号
@@ -185,9 +181,7 @@ def build_prompt(etf_text: str, news_text: str) -> Tuple[str, str]:
 
 【美股新闻】
 {news_text}
-
-【数据说明】
-ETF数据来自东方财富网公开数据。新闻来自Yahoo Finance、Nasdaq.com、MarketWatch等公开RSS源，以及Finnhub API。"""
+"""
     return system_prompt, user_content
 
 def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> Tuple[bool, str, str]:
@@ -199,7 +193,7 @@ def call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -
         "model": "deepseek-chat",
         "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
         "temperature": 0.7,
-        "max_tokens": 3000
+        "max_tokens": 2500
     }
     for attempt in range(1, max_retries + 1):
         try:
@@ -282,12 +276,12 @@ def build_data_source() -> str:
 
 ---
 【数据来源声明】
-本文数据来源包括：
-1. ETF资金流向数据：东方财富网（https://www.eastmoney.com）
-2. 美股新闻：Yahoo Finance、Nasdaq.com、MarketWatch 公开RSS源，以及 Finnhub API
+本文数据来源：
+1. ETF资金流向：东方财富网（https://www.eastmoney.com）
+2. 美股新闻：Yahoo Finance、Nasdaq.com 公开RSS源
 
 数据日期：{today}
-本文由AI辅助生成，内容仅供参考，不构成投资建议。投资有风险，入市需谨慎。
+本文由AI辅助生成，仅供参考，不构成投资建议。
 """
 
 # ====================================================================
@@ -296,7 +290,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v2.0")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.1")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
@@ -313,10 +307,8 @@ def main():
     if not success:
         article = f"""今日简报生成失败
 
-数据情况：
-纳指ETF：{etf_text[:200]}
-
-请检查 DeepSeek API 配置。"""
+数据情况：{etf_text[:200]}
+请检查配置。"""
         title = "简报生成异常"
 
     full_article = article + build_data_source()
@@ -335,10 +327,9 @@ def main():
 
     print("\n" + "=" * 60)
     if push_success:
-        print("  任务执行完毕！请查看微信消息。")
+        print("  ✅ 任务执行完毕！请查看微信消息。")
     else:
-        print("  任务执行完毕，但微信推送未成功。")
-        print("  文章已保存到 briefing.md")
+        print("  ⚠️ 任务执行完毕，推送未成功，文章已保存到 briefing.md")
     print("=" * 60 + "\n")
 
     sys.exit(0 if push_success else 1)
