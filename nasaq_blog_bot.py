@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v2.5
-修复：移除system_prompt中的Markdown符号，避免400错误
+纳斯达克100博客自动写作机器人 v2.6
+修复：更新模型名称为 deepseek-v4-pro
 """
 
 import akshare as ak
@@ -156,11 +156,10 @@ def fetch_all_data() -> Tuple[Dict, str]:
     return etf_data, news_text
 
 # ====================================================================
-#  DeepSeek API（修复版）
+#  DeepSeek API（修复模型名称）
 # ====================================================================
 
 def build_prompt(etf_text: str, news_text: str) -> Tuple[str, str]:
-    # 重要：system_prompt 中不要包含 ## ** 等 Markdown 符号
     system_prompt = """你是一位拥有10年经验的美股ETF策略分析师。
 
 根据纳指ETF资金流向和美股新闻，撰写一篇深度财经短评。
@@ -197,13 +196,13 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
         "Content-Type": "application/json"
     }
 
-    # 确保内容不超长
     if len(user_content) > 10000:
         user_content = user_content[:10000]
         log("内容过长已截断", "WARN")
 
+    # ✅ 修复：模型名称更新为 deepseek-v4-pro
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
@@ -217,7 +216,6 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
             log(f"正在调用DeepSeek API... (第{attempt}次)", "INFO")
             response = requests.post(url, headers=headers, json=payload, timeout=60)
 
-            # 打印状态码便于调试
             log(f"HTTP状态码: {response.status_code}", "INFO")
 
             if response.status_code == 200:
@@ -237,7 +235,6 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
                 else:
                     log("API返回内容为空", "WARN")
             else:
-                # 打印错误响应体，帮助排查
                 log(f"API返回错误: {response.text[:500]}", "WARN")
 
         except Exception as e:
@@ -246,7 +243,6 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
         if attempt < 3:
             time.sleep(2)
 
-    # 所有尝试失败，使用备用内容
     log("所有API尝试失败，使用备用内容", "WARN")
     fallback_title = "📊 纳指每日简报（备用）"
     fallback_content = f"""纳指ETF今日资金流向观察
@@ -310,7 +306,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v2.5")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.6")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
