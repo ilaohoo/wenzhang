@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v2.6
-修复：更新模型名称为 deepseek-v4-pro
+纳斯达克100博客自动写作机器人 v2.7
+修复：PushPlus 改用 POST 请求，避免 414 错误
 """
 
 import akshare as ak
@@ -156,7 +156,7 @@ def fetch_all_data() -> Tuple[Dict, str]:
     return etf_data, news_text
 
 # ====================================================================
-#  DeepSeek API（修复模型名称）
+#  DeepSeek API
 # ====================================================================
 
 def build_prompt(etf_text: str, news_text: str) -> Tuple[str, str]:
@@ -200,7 +200,6 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
         user_content = user_content[:10000]
         log("内容过长已截断", "WARN")
 
-    # ✅ 修复：模型名称更新为 deepseek-v4-pro
     payload = {
         "model": "deepseek-v4-pro",
         "messages": [
@@ -257,7 +256,7 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
     return True, fallback_title, fallback_content
 
 # ====================================================================
-#  推送
+#  PushPlus 推送（修复：改用 POST 请求）
 # ====================================================================
 
 def push_to_wechat(title: str, content: str) -> bool:
@@ -266,14 +265,25 @@ def push_to_wechat(title: str, content: str) -> bool:
     if not PUSHPLUS_TOKEN:
         log("PUSHPLUS_TOKEN 未配置，跳过推送", "WARN")
         return False
+
     url = "https://www.pushplus.plus/send"
-    params = {"token": PUSHPLUS_TOKEN, "title": title[:100], "content": content, "template": "txt"}
+
+    # 改用 POST 请求，内容放在 body 中，避免 URL 过长（414 错误）
+    data = {
+        "token": PUSHPLUS_TOKEN,
+        "title": title[:100],
+        "content": content,
+        "template": "txt"
+    }
+
     try:
         log("正在推送至微信...", "INFO")
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.post(url, data=data, timeout=15)
+
         if response.status_code != 200:
             log(f"推送失败，HTTP状态码: {response.status_code}", "ERROR")
             return False
+
         resp_json = response.json()
         if resp_json.get('code') == 200:
             log("✅ 微信推送成功！", "SUCCESS")
@@ -281,6 +291,7 @@ def push_to_wechat(title: str, content: str) -> bool:
         else:
             log(f"推送失败: {resp_json.get('msg', resp_json)}", "ERROR")
             return False
+
     except Exception as e:
         log(f"推送异常: {e}", "ERROR")
         return False
@@ -306,7 +317,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v2.6")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.7")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
