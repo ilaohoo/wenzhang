@@ -1,9 +1,10 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v2.7
-修复：PushPlus 改用 POST 请求，避免 414 错误
+纳斯达克100博客自动写作机器人 v3.0
+自动发布到 Z-Blog（XML-RPC）
 """
 
 import akshare as ak
@@ -16,19 +17,26 @@ from datetime import datetime
 from typing import Dict, Tuple, List
 import socket
 import json
+import xmlrpc.client
 
 socket.setdefaulttimeout(15)
 
 # ====================================================================
-#  配置
+#  配置（从环境变量读取，安全可靠）
 # ====================================================================
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY") or ""
 
+# 博客发布配置
+BLOG_URL = os.environ.get("BLOG_URL", "")
+BLOG_USERNAME = os.environ.get("BLOG_USERNAME", "")
+BLOG_PASSWORD = os.environ.get("BLOG_PASSWORD", "")
+
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
+ENABLE_BLOG_PUBLISH: bool = True
 
 # ====================================================================
 #  工具函数
@@ -256,7 +264,7 @@ def call_deepseek(system_prompt: str, user_content: str, etf_text: str = "", new
     return True, fallback_title, fallback_content
 
 # ====================================================================
-#  PushPlus 推送（修复：改用 POST 请求）
+#  PushPlus 微信推送
 # ====================================================================
 
 def push_to_wechat(title: str, content: str) -> bool:
@@ -267,8 +275,6 @@ def push_to_wechat(title: str, content: str) -> bool:
         return False
 
     url = "https://www.pushplus.plus/send"
-
-    # 改用 POST 请求，内容放在 body 中，避免 URL 过长（414 错误）
     data = {
         "token": PUSHPLUS_TOKEN,
         "title": title[:100],
@@ -296,6 +302,67 @@ def push_to_wechat(title: str, content: str) -> bool:
         log(f"推送异常: {e}", "ERROR")
         return False
 
+# ====================================================================
+#  博客发布（Z-Blog XML-RPC）
+# ====================================================================
+
+def publish_to_blog(title: str, content: str) -> bool:
+    if not ENABLE_BLOG_PUBLISH:
+        log("博客自动发布已禁用", "WARN")
+        return True
+
+    if not BLOG_URL or not BLOG_USERNAME or not BLOG_PASSWORD:
+        log("博客配置不完整（BLOG_URL/BLOG_USERNAME/BLOG_PASSWORD），跳过发布", "WARN")
+        return False
+
+    log("正在发布文章到博客...", "INFO")
+
+    try:
+        clean_title = title.replace("📊", "").strip()
+        if not clean_title:
+            clean_title = f"纳指每日简报 {datetime.now().strftime('%Y-%m-%d')}"
+
+        paragraphs = content.split("\n\n")
+        html_content = ""
+        for p in paragraphs:
+            p = p.strip()
+            if p:
+                if p.startswith("【标题】"):
+                    html_content += f"<p><strong>{p}</strong></p>"
+                else:
+                    html_content += f"<p>{p}</p>"
+
+        post = {
+            "title": clean_title,
+            "description": html_content,
+            "categories": ["纳指简报"],
+            "dateCreated": xmlrpc.client.DateTime(datetime.now()),
+            "wp_slug": f"nasaq-brief-{datetime.now().strftime('%Y%m%d')}"
+        }
+
+        server = xmlrpc.client.ServerProxy(BLOG_URL)
+        post_id = server.metaWeblog.newPost("1", BLOG_USERNAME, BLOG_PASSWORD, post, True)
+
+        if post_id:
+            log(f"✅ 文章发布成功！ID: {post_id}", "SUCCESS")
+            return True
+        else:
+            log("❌ 文章发布失败，未返回 ID", "ERROR")
+            return False
+
+    except xmlrpc.client.Fault as e:
+        log(f"❌ XML-RPC 错误: {e.faultCode} - {e.faultString}", "ERROR")
+        if "403" in str(e.faultCode):
+            log("  提示：请检查 BLOG_USERNAME 和 BLOG_PASSWORD 是否正确", "WARN")
+        return False
+    except Exception as e:
+        log(f"❌ 发布异常: {e}", "ERROR")
+        return False
+
+# ====================================================================
+#  数据来源声明
+# ====================================================================
+
 def build_data_source() -> str:
     today = datetime.now().strftime("%Y年%m月%d日")
     return f"""
@@ -317,7 +384,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v2.7")
+    print("  📈 纳斯达克100 博客自动写作机器人 v3.0")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
@@ -339,16 +406,19 @@ def main():
     with open("briefing.md", "w", encoding="utf-8") as f:
         f.write(f"{title}\n\n{full_article}")
 
+    # 推送到微信
     push_success = push_to_wechat(title, full_article)
 
+    # 自动发布到博客
+    blog_success = publish_to_blog(title, full_article)
+
     print("\n" + "=" * 60)
-    if push_success:
-        print("  ✅ 任务执行完毕！请查看微信消息。")
-    else:
-        print("  ⚠️ 任务执行完毕，推送未成功，文章已保存到 briefing.md")
+    print("  任务执行结果：")
+    print(f"  微信推送: {'✅ 成功' if push_success else '⚠️ 失败'}")
+    print(f"  博客发布: {'✅ 成功' if blog_success else '⚠️ 失败'}")
     print("=" * 60 + "\n")
 
-    sys.exit(0 if push_success else 1)
+    sys.exit(0 if push_success or blog_success else 1)
 
 if __name__ == "__main__":
     main()
