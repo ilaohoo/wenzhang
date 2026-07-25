@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v2.2
-极速版：所有外部请求带超时控制
+纳斯达克100博客自动写作机器人 v2.3
+新增：多个国外财经新闻源 + 标题去重 + 健壮的超时处理
 """
 
 import akshare as ak
@@ -16,11 +16,11 @@ from datetime import datetime
 from typing import Dict, Tuple, List
 import socket
 
-# 设置全局超时
+# 设置全局网络超时（秒）
 socket.setdefaulttimeout(15)
 
 # ====================================================================
-#  配置
+#  配置（从环境变量读取）
 # ====================================================================
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
@@ -48,60 +48,94 @@ def log(msg: str, level: str = "INFO") -> None:
     print(f"{prefix}[{timestamp}] {msg}{suffix}")
 
 # ====================================================================
-#  新闻抓取模块（带超时）
+#  新闻抓取模块（带超时 + 去重）
 # ====================================================================
 
 def fetch_rss_news() -> str:
-    """从RSS源抓取美股新闻（带超时）"""
+    """
+    从多个RSS源抓取美股新闻
+    包含：雅虎、纳斯达克、路透、彭博、CNBC、WSJ、福布斯等
+    自动去重（基于标题）
+    """
     log("正在抓取RSS新闻...", "INFO")
-    
+
     feeds = [
+        # --- 原有 ---
         "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^IXIC",
         "https://www.nasdaq.com/feed/rssoutbound",
+        # --- 新增国外财经网站 ---
+        "https://feeds.reuters.com/reuters/businessNews",
+        "https://feeds.bloomberg.com/wealth/news.rss",
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "https://feeds.wsj.com/wsj/xml/rss/3_7014.xml",
+        "https://www.forbes.com/investing/feed/",
+        # --- 投资者博客（示例，需确保公开可用）---
+        # "https://www.awealthofcommonsense.com/feed/",
+        # "https://seekingalpha.com/feed.xml",  # 可能需要API key
     ]
-    
+
+    seen_titles = set()
     all_news = []
+
     for url in feeds:
         try:
-            # feedparser 本身会受 socket 超时影响
+            log(f"  尝试抓取: {url}", "INFO")
             feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
-                title = entry.title
-                if title not in all_news:
-                    all_news.append(f"• {title}")
+            # 如果解析出错或没有条目，跳过
+            if not feed.entries:
+                log(f"  无数据或解析失败", "WARN")
+                continue
+
+            for entry in feed.entries[:3]:  # 每个源取前3条
+                title = entry.title.strip()
+                # 去重：如果标题已经存在，跳过
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                # 截取太长的标题（防止影响阅读）
+                if len(title) > 120:
+                    title = title[:117] + "..."
+                all_news.append(f"• {title}")
+
         except Exception as e:
-            log(f"RSS源 {url} 抓取超时，跳过", "WARN")
+            log(f"  RSS源 {url} 抓取超时或错误，跳过", "WARN")
             continue
-    
-    log(f"成功抓取 {len(all_news)} 条RSS新闻", "SUCCESS")
-    return "\n".join(all_news[:8])
+
+    log(f"成功抓取 {len(all_news)} 条RSS新闻（去重后）", "SUCCESS")
+    return "\n".join(all_news[:12])  # 最多保留12条，避免信息过载
 
 def fetch_finnhub_news() -> str:
     """从Finnhub抓取美股个股新闻"""
     if not FINNHUB_API_KEY:
         log("FINNHUB_API_KEY 未配置，跳过", "WARN")
         return ""
-    
+
     log("正在抓取Finnhub个股新闻...", "INFO")
-    
-    symbols = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
+
+    symbols = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
     today = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now().replace(day=datetime.now().day - 3)).strftime("%Y-%m-%d")
-    
+
     all_news = []
+    seen_titles = set()
+
     for sym in symbols:
         try:
             url = f"https://finnhub.io/api/v1/company-news?symbol={sym}&from={from_date}&to={today}&token={FINNHUB_API_KEY}"
             resp = requests.get(url, timeout=10).json()
             for item in resp[:2]:
-                headline = item.get('headline', '')
-                if headline:
+                headline = item.get('headline', '').strip()
+                if headline and headline not in seen_titles:
+                    seen_titles.add(headline)
+                    # 截取过长的标题
+                    if len(headline) > 120:
+                        headline = headline[:117] + "..."
                     all_news.append(f"• {sym}: {headline}")
             time.sleep(0.2)
         except Exception as e:
             log(f"{sym} 新闻抓取失败: {e}", "WARN")
             continue
-    
+
     log(f"成功抓取 {len(all_news)} 条个股新闻", "SUCCESS")
     return "\n".join(all_news[:10])
 
@@ -109,7 +143,7 @@ def fetch_all_news() -> str:
     """汇总所有新闻"""
     rss_news = fetch_rss_news()
     finnhub_news = fetch_finnhub_news()
-    
+
     combined = []
     if rss_news:
         combined.append("【美股宏观新闻】")
@@ -117,11 +151,11 @@ def fetch_all_news() -> str:
     if finnhub_news:
         combined.append("【美股个股新闻】")
         combined.append(finnhub_news)
-    
+
     return "\n\n".join(combined) if combined else "（今日暂无美股新闻）"
 
 # ====================================================================
-#  数据获取（仅ETF资金流向）
+#  数据获取（仅ETF资金流向，不获取美股行情）
 # ====================================================================
 
 def fetch_nasdaq_etf_flow() -> Dict:
@@ -149,10 +183,10 @@ def fetch_nasdaq_etf_flow() -> Dict:
 def fetch_all_data() -> Tuple[Dict, str]:
     log("=" * 50, "INFO")
     log("🚀 开始抓取数据...", "INFO")
-    
+
     etf_data = fetch_nasdaq_etf_flow()
     news_text = fetch_all_news()
-    
+
     log("✅ 数据抓取完成", "SUCCESS")
     log("=" * 50, "INFO")
     return etf_data, news_text
@@ -267,7 +301,8 @@ def build_data_source() -> str:
 【数据来源声明】
 本文数据来源：
 1. ETF资金流向：东方财富网（https://www.eastmoney.com）
-2. 美股新闻：Yahoo Finance、Nasdaq.com 公开RSS源，Finnhub API（如已配置）
+2. 宏观新闻：Yahoo Finance、Nasdaq.com、Reuters、Bloomberg、CNBC、WSJ、Forbes 公开RSS
+3. 个股新闻：Finnhub API（如已配置）
 
 数据日期：{today}
 本文由AI辅助生成，仅供参考，不构成投资建议。
@@ -279,7 +314,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v2.2")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.3")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
