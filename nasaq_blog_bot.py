@@ -1,10 +1,9 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v3.0
-自动发布到 Z-Blog（XML-RPC）
+纳斯达克100博客自动写作机器人 v3.1
+修复：支持自签名证书的 SSL 连接
 """
 
 import akshare as ak
@@ -18,18 +17,19 @@ from typing import Dict, Tuple, List
 import socket
 import json
 import xmlrpc.client
+import ssl
+import urllib.request
 
 socket.setdefaulttimeout(15)
 
 # ====================================================================
-#  配置（从环境变量读取，安全可靠）
+#  配置
 # ====================================================================
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY") or ""
 
-# 博客发布配置
 BLOG_URL = os.environ.get("BLOG_URL", "")
 BLOG_USERNAME = os.environ.get("BLOG_USERNAME", "")
 BLOG_PASSWORD = os.environ.get("BLOG_PASSWORD", "")
@@ -37,6 +37,23 @@ BLOG_PASSWORD = os.environ.get("BLOG_PASSWORD", "")
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
 ENABLE_BLOG_PUBLISH: bool = True
+
+# ====================================================================
+#  自定义 Transport（跳过 SSL 验证）
+# ====================================================================
+
+class UnverifiedHTTPSTransport(xmlrpc.client.SafeTransport):
+    """自定义 Transport，允许跳过 SSL 证书验证（适用于自签名证书）"""
+    def request(self, host, handler, request_body, verbose=False):
+        context = ssl._create_unverified_context()
+        url = "https://" + host + handler
+        req = urllib.request.Request(
+            url,
+            data=request_body.encode('utf-8') if isinstance(request_body, str) else request_body,
+            headers={"Content-Type": "text/xml"}
+        )
+        response = urllib.request.urlopen(req, context=context)
+        return self._parse_response(response)
 
 # ====================================================================
 #  工具函数
@@ -303,7 +320,7 @@ def push_to_wechat(title: str, content: str) -> bool:
         return False
 
 # ====================================================================
-#  博客发布（Z-Blog XML-RPC）
+#  博客发布（支持自签名证书）
 # ====================================================================
 
 def publish_to_blog(title: str, content: str) -> bool:
@@ -318,10 +335,16 @@ def publish_to_blog(title: str, content: str) -> bool:
     log("正在发布文章到博客...", "INFO")
 
     try:
+        # 使用自定义 transport 跳过 SSL 验证
+        transport = UnverifiedHTTPSTransport()
+        server = xmlrpc.client.ServerProxy(BLOG_URL, transport=transport)
+
+        # 清理标题
         clean_title = title.replace("📊", "").strip()
         if not clean_title:
             clean_title = f"纳指每日简报 {datetime.now().strftime('%Y-%m-%d')}"
 
+        # 将纯文本内容转换为 HTML
         paragraphs = content.split("\n\n")
         html_content = ""
         for p in paragraphs:
@@ -340,7 +363,6 @@ def publish_to_blog(title: str, content: str) -> bool:
             "wp_slug": f"nasaq-brief-{datetime.now().strftime('%Y%m%d')}"
         }
 
-        server = xmlrpc.client.ServerProxy(BLOG_URL)
         post_id = server.metaWeblog.newPost("1", BLOG_USERNAME, BLOG_PASSWORD, post, True)
 
         if post_id:
@@ -384,7 +406,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v3.0")
+    print("  📈 纳斯达克100 博客自动写作机器人 v3.1")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
