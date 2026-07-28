@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v3.1
-修复：支持自签名证书的 SSL 连接
+纳斯达克100博客自动写作机器人 v3.2
+修复：自定义 Transport 支持自签名证书
 """
 
 import akshare as ak
@@ -17,8 +17,8 @@ from typing import Dict, Tuple, List
 import socket
 import json
 import xmlrpc.client
+import http.client
 import ssl
-import urllib.request
 
 socket.setdefaulttimeout(15)
 
@@ -43,17 +43,18 @@ ENABLE_BLOG_PUBLISH: bool = True
 # ====================================================================
 
 class UnverifiedHTTPSTransport(xmlrpc.client.SafeTransport):
-    """自定义 Transport，允许跳过 SSL 证书验证（适用于自签名证书）"""
+    """自定义 Transport，跳过 SSL 证书验证"""
     def request(self, host, handler, request_body, verbose=False):
+        # 创建未验证的 SSL 上下文
         context = ssl._create_unverified_context()
-        url = "https://" + host + handler
-        req = urllib.request.Request(
-            url,
-            data=request_body.encode('utf-8') if isinstance(request_body, str) else request_body,
-            headers={"Content-Type": "text/xml"}
-        )
-        response = urllib.request.urlopen(req, context=context)
-        return self._parse_response(response)
+        # 建立 HTTPS 连接
+        conn = http.client.HTTPSConnection(host, context=context)
+        # 发送 POST 请求
+        headers = {"Content-Type": "text/xml"}
+        conn.request("POST", handler, request_body, headers)
+        response = conn.getresponse()
+        # 返回 (host, handler, response) 元组，供 xmlrpc.client 解析
+        return (host, handler, response)
 
 # ====================================================================
 #  工具函数
@@ -406,7 +407,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v3.1")
+    print("  📈 纳斯达克100 博客自动写作机器人 v3.2")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
