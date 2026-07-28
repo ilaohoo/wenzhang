@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-纳斯达克100博客自动写作机器人 v3.3
-修复：使用 requests 直接发送 XML-RPC 请求，支持自签名证书
+纳斯达克100博客自动写作机器人 v2.7
+功能：数据抓取 → AI分析 → 微信推送（无博客发布）
 """
 
 import akshare as ak
@@ -15,30 +15,19 @@ import feedparser
 from datetime import datetime
 from typing import Dict, Tuple, List
 import socket
-import json
-import xml.etree.ElementTree as ET
-
-# 禁用 SSL 警告（因为使用了 verify=False）
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 socket.setdefaulttimeout(15)
 
 # ====================================================================
-#  配置
+#  配置（从环境变量读取）
 # ====================================================================
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY") or ""
 
-BLOG_URL = os.environ.get("BLOG_URL", "")
-BLOG_USERNAME = os.environ.get("BLOG_USERNAME", "")
-BLOG_PASSWORD = os.environ.get("BLOG_PASSWORD", "")
-
 ENABLE_PUSH: bool = True
 ENABLE_PRINT_PREVIEW: bool = True
-ENABLE_BLOG_PUBLISH: bool = True
 
 # ====================================================================
 #  工具函数
@@ -305,161 +294,6 @@ def push_to_wechat(title: str, content: str) -> bool:
         return False
 
 # ====================================================================
-#  博客发布（使用 requests 直接发送 XML-RPC）
-# ====================================================================
-
-def publish_to_blog(title: str, content: str) -> bool:
-    if not ENABLE_BLOG_PUBLISH:
-        log("博客自动发布已禁用", "WARN")
-        return True
-
-    if not BLOG_URL or not BLOG_USERNAME or not BLOG_PASSWORD:
-        log("博客配置不完整（BLOG_URL/BLOG_USERNAME/BLOG_PASSWORD），跳过发布", "WARN")
-        return False
-
-    log("正在发布文章到博客...", "INFO")
-
-    try:
-        # 清理标题
-        clean_title = title.replace("📊", "").strip()
-        if not clean_title:
-            clean_title = f"纳指每日简报 {datetime.now().strftime('%Y-%m-%d')}"
-
-        # 将纯文本内容转换为 HTML
-        paragraphs = content.split("\n\n")
-        html_content = ""
-        for p in paragraphs:
-            p = p.strip()
-            if p:
-                if p.startswith("【标题】"):
-                    html_content += f"<p><strong>{p}</strong></p>"
-                else:
-                    html_content += f"<p>{p}</p>"
-
-        # 构造 XML-RPC 请求体
-        method_call = ET.Element("methodCall")
-
-        method_name = ET.SubElement(method_call, "methodName")
-        method_name.text = "metaWeblog.newPost"
-
-        params = ET.SubElement(method_call, "params")
-
-        # blogid
-        p1 = ET.SubElement(params, "param")
-        v1 = ET.SubElement(p1, "value")
-        s1 = ET.SubElement(v1, "string")
-        s1.text = "1"
-
-        # username
-        p2 = ET.SubElement(params, "param")
-        v2 = ET.SubElement(p2, "value")
-        s2 = ET.SubElement(v2, "string")
-        s2.text = BLOG_USERNAME
-
-        # password
-        p3 = ET.SubElement(params, "param")
-        v3 = ET.SubElement(p3, "value")
-        s3 = ET.SubElement(v3, "string")
-        s3.text = BLOG_PASSWORD
-
-        # struct (post data)
-        p4 = ET.SubElement(params, "param")
-        v4 = ET.SubElement(p4, "value")
-        struct = ET.SubElement(v4, "struct")
-
-        # title
-        m1 = ET.SubElement(struct, "member")
-        n1 = ET.SubElement(m1, "name")
-        n1.text = "title"
-        v1_1 = ET.SubElement(m1, "value")
-        s1_1 = ET.SubElement(v1_1, "string")
-        s1_1.text = clean_title
-
-        # description
-        m2 = ET.SubElement(struct, "member")
-        n2 = ET.SubElement(m2, "name")
-        n2.text = "description"
-        v2_1 = ET.SubElement(m2, "value")
-        s2_1 = ET.SubElement(v2_1, "string")
-        s2_1.text = html_content
-
-        # categories
-        m3 = ET.SubElement(struct, "member")
-        n3 = ET.SubElement(m3, "name")
-        n3.text = "categories"
-        v3_1 = ET.SubElement(m3, "value")
-        arr = ET.SubElement(v3_1, "array")
-        data = ET.SubElement(arr, "data")
-        val = ET.SubElement(data, "value")
-        s3_1 = ET.SubElement(val, "string")
-        s3_1.text = "纳指简报"
-
-        # publish (true)
-        m4 = ET.SubElement(struct, "member")
-        n4 = ET.SubElement(m4, "name")
-        n4.text = "publish"
-        v4_1 = ET.SubElement(m4, "value")
-        b1 = ET.SubElement(v4_1, "boolean")
-        b1.text = "1"
-
-        xml_str = ET.tostring(method_call, encoding='unicode')
-
-        # 发送请求
-        log("发送 XML-RPC 请求...", "INFO")
-        response = requests.post(
-            BLOG_URL,
-            data=xml_str,
-            headers={"Content-Type": "text/xml"},
-            verify=False,
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            log(f"❌ HTTP 错误: {response.status_code}", "ERROR")
-            return False
-
-        # 解析响应
-        try:
-            resp_xml = ET.fromstring(response.text)
-            # 查找 value/string 节点中的文章 ID
-            string_nodes = resp_xml.findall(".//value/string")
-            if string_nodes:
-                post_id = string_nodes[0].text
-                if post_id and post_id.isdigit():
-                    log(f"✅ 文章发布成功！ID: {post_id}", "SUCCESS")
-                    return True
-
-            # 检查是否是 fault 响应
-            fault_node = resp_xml.find(".//fault")
-            if fault_node is not None:
-                # 提取错误信息
-                for member in fault_node.findall(".//member"):
-                    name_node = member.find("name")
-                    if name_node is not None and name_node.text == "faultString":
-                        value_node = member.find("value/string")
-                        if value_node is not None:
-                            log(f"❌ XML-RPC 错误: {value_node.text}", "ERROR")
-                            return False
-                log(f"❌ XML-RPC 错误: {response.text[:300]}", "ERROR")
-                return False
-
-            log(f"❌ 无法解析响应: {response.text[:200]}", "ERROR")
-            return False
-
-        except ET.ParseError as e:
-            log(f"❌ XML 解析错误: {e}", "ERROR")
-            log(f"响应内容: {response.text[:300]}", "ERROR")
-            return False
-
-    except requests.exceptions.SSLError as e:
-        log(f"❌ SSL 错误: {e}", "ERROR")
-        log("  提示：如果博客使用自签名证书，请检查 verify=False 是否生效", "WARN")
-        return False
-    except Exception as e:
-        log(f"❌ 发布异常: {e}", "ERROR")
-        return False
-
-# ====================================================================
 #  数据来源声明
 # ====================================================================
 
@@ -484,7 +318,7 @@ def build_data_source() -> str:
 
 def main():
     print("\n" + "=" * 60)
-    print("  📈 纳斯达克100 博客自动写作机器人 v3.3")
+    print("  📈 纳斯达克100 博客自动写作机器人 v2.7")
     print("  ⏰ 运行时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 60 + "\n")
 
@@ -509,16 +343,14 @@ def main():
     # 推送到微信
     push_success = push_to_wechat(title, full_article)
 
-    # 自动发布到博客
-    blog_success = publish_to_blog(title, full_article)
-
     print("\n" + "=" * 60)
-    print("  任务执行结果：")
-    print(f"  微信推送: {'✅ 成功' if push_success else '⚠️ 失败'}")
-    print(f"  博客发布: {'✅ 成功' if blog_success else '⚠️ 失败'}")
+    if push_success:
+        print("  ✅ 任务执行完毕！请查看微信消息。")
+    else:
+        print("  ⚠️ 任务执行完毕，推送未成功，文章已保存到 briefing.md")
     print("=" * 60 + "\n")
 
-    sys.exit(0 if push_success or blog_success else 1)
+    sys.exit(0 if push_success else 1)
 
 if __name__ == "__main__":
     main()
